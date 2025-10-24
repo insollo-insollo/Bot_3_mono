@@ -1,0 +1,191 @@
+{
+  "pairs": {
+    "BTCUSDT": {
+      "delta": 0.3,
+      "precision": 1,
+      "trailing": 0.0076,
+      "maxer": 5,
+      "quantity_step": 0.001,
+      "stop_loss": 0.04,
+      "emergency_stop_loss": 0.01
+    },
+    "BTCUSDC": {
+      "delta": 0.3,
+      "precision": 1,
+      "trailing": 0.0076,
+      "maxer": 5,
+      "quantity_step": 0.001,
+      "stop_loss": 0.04,
+      "emergency_stop_loss": 0.01
+    },
+    "ETHUSDT": {
+      "delta": 0.1,
+      "precision": 2,
+      "trailing": 0.0286,
+      "maxer": 1,
+      "quantity_step": 0.001,
+      "stop_loss": 0.04,
+      "emergency_stop_loss": 0.01
+    },
+    "ETHUSDC": {
+      "delta": 0.1,
+      "precision": 2,
+      "trailing": 0.0286,
+      "maxer": 1,
+      "quantity_step": 0.001,
+      "stop_loss": 0.04,
+      "emergency_stop_loss": 0.01
+    },
+    "BCHUSDT": {
+      "delta": 0.05,
+      "precision": 2,
+      "trailing": 0.0095,
+      "maxer": 0.5,
+      "quantity_step": 0.001,
+      "stop_loss": 0.02,
+      "emergency_stop_loss": 0.01
+    },
+    "BCHUSDC": {
+      "delta": 0.05,
+      "precision": 2,
+      "trailing": 0.0095,
+      "maxer": 0.5,
+      "quantity_step": 0.001,
+      "stop_loss": 0.02,
+      "emergency_stop_loss": 0.01
+    },
+    "BNBUSDT": {
+      "delta": 0.05,
+      "precision": 2,
+      "trailing": 0.0301,
+      "maxer": 0.5,
+      "quantity_step": 0.01,
+      "stop_loss": 0.04,
+      "emergency_stop_loss": 0.01
+    },
+    "BNBUSDC": {
+      "delta": 0.05,
+      "precision": 2,
+      "trailing": 0.0301,
+      "maxer": 0.5,
+      "quantity_step": 0.01,
+      "stop_loss": 0.04,
+      "emergency_stop_loss": 0.01
+    },
+    "DOGEUSDT": {
+      "delta": 0.0001,
+      "precision": 5,
+      "trailing": 0.0227,
+      "maxer": 0.0005,
+      "quantity_step": 1,
+      "stop_loss": 0.03,
+      "emergency_stop_loss": 0.01
+    },
+    "DOGEUSDC": {
+      "delta": 0.00005,
+      "precision": 5,
+      "trailing": 0.0227,
+      "maxer": 0.0001,
+      "quantity_step": 1,
+      "stop_loss": 0.03,
+      "emergency_stop_loss": 0.01
+    },
+    "LTCUSDT": {
+      "delta": 0.05,
+      "precision": 2,
+      "trailing": 0.0137,
+      "maxer": 0.3,
+      "quantity_step": 0.001,
+      "stop_loss": 0.02,
+      "emergency_stop_loss": 0.01
+    },
+    "LTCUSDC": {
+      "delta": 0.05,
+      "precision": 2,
+      "trailing": 0.0137,
+      "maxer": 0.05,
+      "quantity_step": 0.001,
+      "stop_loss": 0.02,
+      "emergency_stop_loss": 0.01
+    },
+    "SOLUSDT": {
+      "delta": 0.05,
+      "precision": 2,
+      "trailing": 0.0202,
+      "maxer": 0.3,
+      "quantity_step": 0.01,
+      "stop_loss": 0.01,
+      "emergency_stop_loss": 0.01
+    },
+    "SOLUSDC": {
+      "delta": 0.05,
+      "precision": 2,
+      "trailing": 0.0202,
+      "maxer": 0.3,
+      "quantity_step": 0.01,
+      "stop_loss": 0.01,
+      "emergency_stop_loss": 0.01
+    }
+  },
+  "users": [
+    {
+      "uid": 1,
+      "api_key": "IFyaUd2G2HkaipMznlWHJiJ2ZSwNVJyKVydmdxOVy8Sw4qDqTatb8On5b1aJXCGI",
+      "secret_key": "Z0tm2KI9TkVqJGZ2cKJI3wPP0NMRIKcoOXAIqxskuIBjhGaWp84TgPkSc2gYZMMn",
+      "ip": "68.183.180.36",
+      "parts": 400
+    }
+  ],
+ "trading": {
+  "cooldown_seconds": 0,
+  "cooldown_minutes": 60,
+  "ws_url": "wss://ws-fapi.binance.com/ws-fapi/v1"
+},
+  "signals": {
+   "source": "ws",
+   "url": "wss://135.181.173.166:28765",
+   "insecure_tls": true,
+   "enter_on_start_if_active": true,
+   "require_flat_reset_after_cooldown": false,
+   "ws_reconnect_min_seconds": 1,
+   "ws_reconnect_max_seconds": 30,
+   "ws_stale_seconds": 60
+  },
+  "maker_engine": {
+    "ladder_ticks": [0,1,2,3,5,8],
+    "ladder_debounce_ms": 30,
+    "amend_time_budget_ms": 1200,
+    "ws_retries_before_rest": 5,
+    "wide_spread_extra_ticks": 1,
+    "large_size_threshold_ticks": [
+      {"ratio": 1.0, "ticks": 0},
+      {"ratio": 2.0, "ticks": 2},
+      {"ratio": 3.0, "ticks": 3},
+      {"ratio": 5.0, "ticks": 5}
+    ]
+  },
+  "logging": {
+    "mode": "production",
+    "engine": {
+      "heartbeat_minutes": 30,
+      "rotation": {
+        "strategy": "size",
+        "max_bytes": 10485760,
+        "backup_count": 5
+      },
+      "aggregation": {
+        "enabled": true,
+        "window_seconds": 60,
+        "min_count": 5,
+        "output": "engine_agg.log",
+        "rotation": {
+          "strategy": "size",
+          "max_bytes": 5242880,
+          "backup_count": 5
+        },
+        "group_by": ["http_status","exchange_code","method","path"],
+        "include_codes": ["418","429","-2019","-2013","-1111","-5000"]
+      }
+    }
+  }
+}

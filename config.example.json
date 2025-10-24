@@ -1,0 +1,30 @@
+{
+	"pairs": {
+		"DOGEUSDT": {
+			"delta": 0.0001,
+			"precision": 5,
+			"trailing": 0.0008,
+			"maxer": 0.0005,
+			"miner": 0.001,
+			"quantity_step": 1,
+			"stop_loss": 0.005,
+			"emergency_stop_loss": 0.005
+		}
+	},
+	"users": [
+		{
+			"uid": 1,
+			"api_key": "YOUR_API_KEY",
+			"secret_key": "YOUR_SECRET",
+			"ip": "YOUR_IP",
+			"parts": 300
+		}
+	],
+	"trading": {
+		"use_ws": true,
+		"venue": "usdm",
+		"ws_url": "wss://ws-fapi.binance.com/ws-fapi/v1",
+		"disable_rest_fallback_on_business_errors": true,
+		"ws_transport_fallback_threshold": 2
+	}
+} 
