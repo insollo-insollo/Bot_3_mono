@@ -16,6 +16,20 @@ class MakerTuning:
     volatility_extra_ticks_high: int = 2
     # Size/Depth heuristic: ratio_to_topDepth -> extra ticks
     large_size_threshold_ticks: List[Tuple[float, int]] = None
+    
+    # NEW: High Volatility Mode parameters
+    # Normal mode (default)
+    normal_min_tick_diff_entry: int = 5
+    normal_min_tick_diff_exit: int = 10
+    normal_min_amend_interval: float = 2.0
+    normal_tolerance_ticks: int = 1
+    
+    # High Volatility mode (activated when volatility detected)
+    hv_min_tick_diff_entry: int = 20
+    hv_min_tick_diff_exit: int = 30
+    hv_min_amend_interval: float = 5.0
+    hv_tolerance_ticks: int = 5
+    hv_max_amendments_per_order: int = 3
 
     def __post_init__(self):
         if self.ladder_ticks is None:
@@ -28,6 +42,25 @@ class MakerTuning:
                 (5.0, 5),
                 (8.0, 8),
             ]
+    
+    def get_params(self, pair: str, volatility_mode: str = "NORMAL") -> dict:
+        """Get parameters based on current volatility mode"""
+        if volatility_mode == "HIGH_VOLATILITY":
+            return {
+                'min_tick_diff_entry': self.hv_min_tick_diff_entry,
+                'min_tick_diff_exit': self.hv_min_tick_diff_exit,
+                'min_amend_interval': self.hv_min_amend_interval,
+                'tolerance_ticks': self.hv_tolerance_ticks,
+                'max_amendments': self.hv_max_amendments_per_order
+            }
+        else:
+            return {
+                'min_tick_diff_entry': self.normal_min_tick_diff_entry,
+                'min_tick_diff_exit': self.normal_min_tick_diff_exit,
+                'min_amend_interval': self.normal_min_amend_interval,
+                'tolerance_ticks': self.normal_tolerance_ticks,
+                'max_amendments': 999  # Unlimited in normal mode
+            }
 
 
 @dataclass

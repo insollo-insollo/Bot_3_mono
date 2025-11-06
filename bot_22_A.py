@@ -29,6 +29,7 @@ import math
 
 import aiohttp
 from maker_engine import PegPriceResolver, MakerOrderController, MakerTuning  # type: ignore
+from volatility_monitor import VolatilityMonitor, OrderStateTracker, VolatilityConfig  # type: ignore
 
 
 class AggressiveRestLimiter:
@@ -467,6 +468,13 @@ class SymbolBot:
         self.exit_ctrl = MakerOrderController(self, "exit", self._peg_resolver, self._maker_tuning)
         self.tp_ctrl = MakerOrderController(self, "exit", self._peg_resolver, self._maker_tuning, exit_kind="tp")
         self.sl_ctrl = MakerOrderController(self, "exit", self._peg_resolver, self._maker_tuning, exit_kind="sl")
+        
+        # NEW: Volatility monitoring and order state tracking
+        self.volatility_monitor = VolatilityMonitor(VolatilityConfig())
+        self.order_state_tracker = OrderStateTracker()
+        
+        # Store last price for volatility monitoring
+        self._last_monitored_price = 0.0
 
 
 
@@ -1508,6 +1516,39 @@ class SymbolBot:
         price = await self._get_price()
         if not price:
             return
+        
+        # NEW: Update volatility monitor with price changes
+        if self._last_monitored_price > 0 and price > 0:
+            self.volatility_monitor.on_price_update(self.pair, self._last_monitored_price, price)
+            
+            # Update spread if we have order book data
+            try:
+                book = self._get_order_book()
+                if book and book.get('best_bid') and book.get('best_ask'):
+                    spread = float(book['best_ask']) - float(book['best_bid'])
+                    spread_pct = spread / price if price > 0 else 0
+                    self.volatility_monitor.on_spread_update(self.pair, spread_pct)
+            except Exception:
+                pass
+        
+        self._last_monitored_price = price
+        
+        # Check volatility mode and log transitions
+        volatility_mode = self.volatility_monitor.get_mode(self.pair)
+        volatility_score = self.volatility_monitor.get_score(self.pair)
+        
+        # Log mode changes
+        if not hasattr(self, '_last_volatility_mode'):
+            self._last_volatility_mode = {}
+        
+        if self._last_volatility_mode.get(self.pair) != volatility_mode:
+            if volatility_mode == "HIGH_VOLATILITY":
+                self._summary_log(f"⚡ ENTERING HIGH VOLATILITY MODE for {self.pair} (score: {volatility_score:.1f})")
+                self._summary_log(f"   HV Mode Settings: min_tick_diff_exit={self._maker_tuning.hv_min_tick_diff_exit}, " +
+                                f"amend_interval={self._maker_tuning.hv_min_amend_interval}s, max_amendments={self._maker_tuning.hv_max_amendments_per_order}")
+            elif self._last_volatility_mode.get(self.pair) == "HIGH_VOLATILITY":
+                self._summary_log(f"✅ EXITING HIGH VOLATILITY MODE for {self.pair} (score: {volatility_score:.1f})")
+            self._last_volatility_mode[self.pair] = volatility_mode
         
         # Get current signal state
         signals = load_json(SIGNALS_PATH, {})
@@ -3240,7 +3281,15 @@ class SymbolBot:
             if (client_id == self.entry_id or client_id == self.exit_id or 
                 client_id == self.emergency_cid or client_id.startswith(f"{self.pair}_")):
                 
+                # NEW: Mark order as canceled in state tracker
+                if status == "CANCELED":
+                    self.order_state_tracker.mark_canceled(client_id)
+                
                 if status in ["FILLED", "PARTIALLY_FILLED"]:
+                    # NEW: Mark order as filled in state tracker immediately
+                    if status == "FILLED":
+                        self.order_state_tracker.mark_filled(client_id)
+                    
                     # Update internal state immediately - minimal logging
                     if client_id == self.entry_id:
                         self.entry_id = None
@@ -3254,8 +3303,24 @@ class SymbolBot:
                         self.state.update({"tp": 0, "sl": 0, "last": now()})
                         # SIGNAL DEDUPLICATION: Reset ignored signal tracking when position closes
                         self.last_ignored_signal_type = None
+                        
+                        # NEW: Clear ESL when position closes
+                        if self.emergency_cid:
+                            try:
+                                await self._cancel_emergency_stop()
+                                self.emergency_cid = None
+                            except Exception as e:
+                                self._detailed_log(f"Error clearing ESL on exit fill: {e}")
+                        
+                        # Reset ESL state
+                        self.emergency_sl_price = 0.0
+                        self.emergency_sl_activated = False
+                        self.emergency_sl_tp_reference = 0.0
+                        self.emergency_sl_initialized = False
+                        
                         self._summary_log(f"EXIT_FILLED_STREAM: cid={client_id}")
                         self._summary_log("🔄 POSITION_STATE_CLEARED: SL/TP reset after exit fill")
+                        self._summary_log("🧹 ESL_CLEARED: Emergency stop cleared after position closure")
                     elif client_id == self.emergency_cid:
                         self.emergency_cid = None
                         # CRITICAL FIX: Circuit breaker - immediately stop all order management
