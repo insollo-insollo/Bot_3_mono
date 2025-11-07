@@ -1,18 +1,24 @@
 """
 Bot_22_A.py - Enhanced Trading Bot with Comprehensive Fixes
 
-LATEST CHANGES (2025-09-27 - Comprehensive Fixes):
+LATEST CHANGES (2025-11-07 - v1.1.1 Position Closure Race Condition Fix):
+🔥 CRITICAL FIX: Position closure race condition between WebSocket and REST API
+- Added post-closure REST query cooldown (2 seconds) to prevent stale data reads
+- Prevents false "PROACTIVE_SYNC: Position detected" triggers after closures
+- Eliminates ghost position reinitializations and unnecessary ESL placements
+- Fixes "ReduceOnly Order is rejected" errors from non-existent positions
+- Changes: Lines 479-482 (init), 1085-1098 (position query), 3328, 3364, 3389 (closure markers)
+
+PREVIOUS CHANGES (2025-09-27 - Comprehensive Fixes):
 1. ESL PLACEMENT: Fixed silent ESL placement failures with proper error handling
 2. FLAT SIGNAL SPAM: Added deduplication to prevent "FLAT SIGNAL: Cancelling X orders" spam
 3. POSITION STATUS TP: Enhanced to show calculated trailing TP when active  
 4. TRAILING ACTIVATION: Added trailing activation price display when not activated
 5. ENHANCED LOGGING: Better error visibility and monitoring
-
-PREVIOUS CHANGES:
-- Signal deduplication to prevent "SIGNAL IGNORED" spam (lines ~1672-1690)
-- Fixed exit order partial fill calculation (lines ~2463-2490)
-- Added ESL fill circuit breaker to prevent race conditions
-- Enhanced logging for partial fill monitoring
+6. Signal deduplication to prevent "SIGNAL IGNORED" spam (lines ~1672-1690)
+7. Fixed exit order partial fill calculation (lines ~2463-2490)
+8. Added ESL fill circuit breaker to prevent race conditions
+9. Enhanced logging for partial fill monitoring
 
 BACKUPS: 
 - bot_22_A.py.backup_before_comprehensive_fixes
@@ -475,6 +481,11 @@ class SymbolBot:
         
         # Store last price for volatility monitoring
         self._last_monitored_price = 0.0
+        
+        # FIX v1.1.1: Position closure race condition prevention
+        # Track when position closes via stream to avoid querying stale REST API data
+        self.position_closed_at = 0  # Timestamp of last position closure notification
+        self.position_closure_cooldown = 2.0  # Seconds to wait before trusting REST API after closure
 
 
 
@@ -1077,6 +1088,21 @@ class SymbolBot:
 
     async def _position(self):
         """Get current position with enhanced error handling and validation"""
+        # FIX v1.1.1: Race condition prevention - skip REST query during post-closure cooldown
+        # After receiving position closure via WebSocket, REST API may return stale cached data
+        # for 100-500ms, causing false "position recovered" detection and ghost order placements
+        if self.position_closed_at > 0:
+            time_since_closure = now() - self.position_closed_at
+            if time_since_closure < self.position_closure_cooldown:
+                # Too soon after stream closure notification - REST API likely has stale data
+                # Skip query to prevent false position detection
+                self._detailed_log(f"COOLDOWN: Skipping position query {time_since_closure:.1f}s after closure (cooldown={self.position_closure_cooldown}s)")
+                return None
+            else:
+                # Cooldown period expired - reset the marker and proceed with normal query
+                self.position_closed_at = 0
+                self._detailed_log(f"COOLDOWN_EXPIRED: Resuming normal position queries after {time_since_closure:.1f}s")
+        
         try:
             data = await (self.order_manager.position_risk(self.pair) if self.order_manager else self.rest.position_risk(self.pair))
             for d in data:
@@ -3304,6 +3330,9 @@ class SymbolBot:
                         # SIGNAL DEDUPLICATION: Reset ignored signal tracking when position closes
                         self.last_ignored_signal_type = None
                         
+                        # FIX v1.1.1: Mark position closure time to prevent REST API race condition
+                        self.position_closed_at = now()
+                        
                         # NEW: Clear ESL when position closes
                         if self.emergency_cid:
                             try:
@@ -3336,6 +3365,10 @@ class SymbolBot:
                         self.emergency_sl_initialized = False
                         # SIGNAL DEDUPLICATION: Reset ignored signal tracking when position closes via ESL
                         self.last_ignored_signal_type = None
+                        
+                        # FIX v1.1.1: Mark position closure time to prevent REST API race condition
+                        self.position_closed_at = now()
+                        
                         self._summary_log(f"ESL_FILLED_STREAM: cid={client_id}")
                         self._summary_log("🔄 POSITION_STATE_CLEARED: SL/TP/ESL reset after ESL fill")
                         self._summary_log("🛑 CIRCUIT_BREAKER: All order management stopped after ESL fill")
@@ -3357,6 +3390,10 @@ class SymbolBot:
                             self.state.update({"tp": 0, "sl": 0, "last": now()})
                             # SIGNAL DEDUPLICATION: Reset ignored signal tracking when position closes
                             self.last_ignored_signal_type = None
+                            
+                            # FIX v1.1.1: Mark position closure time to prevent REST API race condition
+                            self.position_closed_at = now()
+                            
                             self._summary_log("🔄 POSITION_STATE_CLEARED: SL/TP reset after position closure")
                     self._last_position_amt = pos_amt
 
