@@ -1232,6 +1232,9 @@ class SymbolBot:
                     except Exception:
                         pass
                     self.state.update({"tp": 0, "sl": 0, "last": now()})
+                    # FIX v1.1.1: Mark position closure time to prevent REST API race condition
+                    # Also set cooldown marker when clearing state via STATE MISMATCH path
+                    self.position_closed_at = now()
                     self.exit_id = None
                     # CRITICAL FIX: Clear controller tracking when exit_id is cleared
                     self.exit_controller_type = None
