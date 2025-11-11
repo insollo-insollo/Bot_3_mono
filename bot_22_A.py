@@ -455,6 +455,12 @@ class SymbolBot:
         self.emergency_sl_initialized = False
         self.exit_controller_type = None  # Track which controller placed the current exit order
         
+        # Dynamic Leverage System (v1.2.0)
+        self.current_leverage = None
+        self.last_leverage_update = 0
+        self.starting_equity = None
+        self.leverage_circuit_breaker_active = False
+        
         # NEW: WS metrics tracking
         self.ws_metrics = {
             "attempts": 0,
@@ -1300,6 +1306,98 @@ class SymbolBot:
             pass
         return {}
 
+    async def _initialize_dynamic_leverage(self):
+        """
+        Dynamic Leverage System v1.2.0
+        
+        Maintains fixed position sizes by adjusting leverage based on current balance.
+        This ensures symmetric risk/reward and full recovery potential after drawdowns.
+        """
+        try:
+            # Load leverage configuration
+            cfg = load_json(CONFIG_PATH, {}) or {}
+            lev_cfg = cfg.get("leverage", {})
+            
+            # Check if dynamic leverage is enabled
+            if lev_cfg.get("mode", "static") != "dynamic":
+                # Static leverage mode - use configured value
+                static_lev = lev_cfg.get("base_leverage", 20)
+                await self.rest.set_leverage(self.pair, static_lev)
+                self.current_leverage = static_lev
+                self._summary_log(f"🔧 STATIC_LEVERAGE: {static_lev}x for {self.pair}")
+                return
+            
+            # Get current account equity
+            equity = await self.rest.account_equity()
+            
+            # Store starting equity on first initialization
+            if self.starting_equity is None:
+                self.starting_equity = equity
+            
+            # Check circuit breaker
+            circuit_breaker_threshold = float(lev_cfg.get("circuit_breaker_threshold", 0.40))
+            if equity < self.starting_equity * circuit_breaker_threshold:
+                if not self.leverage_circuit_breaker_active:
+                    self._summary_log(f"🚨 LEVERAGE_CIRCUIT_BREAKER: Balance ${equity:.2f} < threshold ${self.starting_equity * circuit_breaker_threshold:.2f}")
+                    self._summary_log(f"   Initial balance: ${self.starting_equity:.2f}")
+                    self._summary_log(f"   Current balance: ${equity:.2f} ({(equity/self.starting_equity)*100:.1f}%)")
+                    self._summary_log(f"   ⚠️ TRADING PAUSED - Manual intervention required")
+                    self.leverage_circuit_breaker_active = True
+                return
+            
+            # Get configuration
+            target_notional = float(lev_cfg.get("target_notional_usd", 100.0))
+            base_leverage = int(lev_cfg.get("base_leverage", 20))
+            min_leverage = int(lev_cfg.get("min_leverage", 10))
+            max_leverage = int(lev_cfg.get("max_leverage", 50))
+            
+            # Calculate current natural notional based on parts
+            current_notional = (equity / self.uc.parts) * 100
+            
+            # Calculate required leverage to maintain target notional
+            if current_notional > 0:
+                leverage_multiplier = target_notional / current_notional
+                required_leverage = int(base_leverage * leverage_multiplier)
+            else:
+                required_leverage = base_leverage
+            
+            # Clamp to safety limits
+            required_leverage = max(min_leverage, min(required_leverage, max_leverage))
+            
+            # Only update if changed
+            if required_leverage != self.current_leverage:
+                try:
+                    await self.rest.set_leverage(self.pair, required_leverage)
+                    old_leverage = self.current_leverage or "None"
+                    self.current_leverage = required_leverage
+                    self.last_leverage_update = now()
+                    
+                    # Detailed logging
+                    self._summary_log(f"🔧 DYNAMIC_LEVERAGE_UPDATED: {self.pair}")
+                    self._summary_log(f"   Balance: ${equity:.2f} (start: ${self.starting_equity:.2f})")
+                    self._summary_log(f"   Natural notional: ${current_notional:.2f}")
+                    self._summary_log(f"   Target notional: ${target_notional:.2f}")
+                    self._summary_log(f"   Leverage: {old_leverage} → {required_leverage}x")
+                    self._summary_log(f"   Multiplier: {leverage_multiplier:.2f}x")
+                    
+                    if required_leverage == max_leverage:
+                        self._summary_log(f"   ⚠️ WARNING: At maximum leverage ({max_leverage}x)")
+                    
+                except Exception as e:
+                    if "leverage not modified" in str(e).lower() or "no need to change" in str(e).lower():
+                        self.current_leverage = required_leverage
+                        self._summary_log(f"ℹ️ LEVERAGE_ALREADY_SET: {required_leverage}x for {self.pair}")
+                    else:
+                        self._summary_log(f"❌ LEVERAGE_SET_FAILED: {self.pair} - {str(e)[:100]}")
+                        raise
+            else:
+                # Leverage unchanged
+                self._detailed_log(f"Leverage unchanged: {required_leverage}x for {self.pair}")
+                
+        except Exception as e:
+            self._summary_log(f"⚠️ DYNAMIC_LEVERAGE_INIT_FAILED: {self.pair} - {str(e)[:100]}")
+            # Don't fail initialization, but log the error
+
     async def _initialize_bot(self):
         """Complete bot initialization with proper startup sequence"""
         async with self.initialization_lock:
@@ -1316,6 +1414,9 @@ class SymbolBot:
                 await self._ensure_symbol_filters()
             except Exception:
                 pass
+            
+            # Step 2a: Initialize dynamic leverage (v1.2.0)
+            await self._initialize_dynamic_leverage()
             
             # Step 3: Reconcile exchange state with local state
             await self._reconcile_exchange_state()
@@ -1870,7 +1971,9 @@ class SymbolBot:
                 "entry_time": now()
             }
             self.trade_log.append(trade_record)
-            self._summary_log(f"📊 POSITION OPENED: ID={self.position_id} | {side} {pos['qty']}@{pos['entry']:.5f} | SL={self.state['sl']:.5f} | Emergency SL={self.emergency_sl_price:.5f}")
+            # Include leverage in position opened log
+            leverage_info = f" | Leverage={self.current_leverage}x" if self.current_leverage else ""
+            self._summary_log(f"📊 POSITION OPENED: ID={self.position_id} | {side} {pos['qty']}@{pos['entry']:.5f} | SL={self.state['sl']:.5f} | Emergency SL={self.emergency_sl_price:.5f}{leverage_info}")
             self._detailed_log(f"Trade record created: {trade_record}")
             
             # CRITICAL FIX: Set position_confirmed for new positions to enable ESL placement

@@ -1,4 +1,14 @@
 {
+  "leverage": {
+    "mode": "dynamic",
+    "target_notional_usd": 100,
+    "base_leverage": 20,
+    "min_leverage": 10,
+    "max_leverage": 50,
+    "circuit_breaker_threshold": 0.40,
+    "recalculate_on_init": true,
+    "recalculate_interval_hours": 24
+  },
   "pairs": {
     "BTCUSDT": {
       "delta": 0.3,
