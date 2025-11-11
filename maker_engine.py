@@ -171,6 +171,12 @@ class MakerOrderController:
         self._last_price: Optional[float] = None
         self.exit_kind: Optional[str] = exit_kind
         self._last_qty: Optional[float] = None
+        
+        # Ghost order prevention tracking (v1.1.2)
+        self._replacement_attempts: int = 0
+        self._replacement_signal_id: Optional[str] = None
+        self._last_replacement_time: float = 0.0
+        self._circuit_breaker_count: int = 0
 
     def _now(self) -> float:
         return time.time()
@@ -221,6 +227,203 @@ class MakerOrderController:
                     self.bot._summary_log(f"WORKING_CID_UPDATED {{type={self.order_type}, from={old}, to={cid}}}")
             except Exception:
                 pass
+
+    async def _is_safe_to_replace_order(
+        self,
+        *,
+        original_cid: str,
+        side: str,
+        qty: float,
+        reduce_only: bool
+    ) -> Tuple[bool, str]:
+        """
+        Comprehensive safety checks before placing replacement order (v1.1.2 Ghost Order Fix).
+        Returns (is_safe, reason) tuple.
+        
+        This prevents double position disasters by verifying:
+        1. Original order is truly cancelled (not filled/partial)
+        2. No position exists (for entry) or position exists (for exit)
+        3. No duplicate working orders exist
+        4. Internal state is consistent
+        5. Replacement attempt limits not exceeded
+        6. Cooldown period respected
+        """
+        pair = self.bot.pair
+        
+        # Safety Check 1: Original Order Status
+        try:
+            order_status = await (
+                self.bot.order_manager.get_order(pair, original_cid) 
+                if self.bot.order_manager 
+                else self.bot.rest.get_order(pair, original_cid)
+            )
+            if order_status:
+                status = str(order_status.get("status", "")).upper()
+                if status == "FILLED":
+                    return False, f"original_order_filled:status={status}"
+                if status == "PARTIALLY_FILLED":
+                    return False, f"original_order_partial:status={status}"
+                if status == "NEW":
+                    return False, f"original_order_still_active:status={status}"
+                # Only CANCELED/EXPIRED are safe to replace
+                if status not in ["CANCELED", "CANCELLED", "EXPIRED", "REJECTED"]:
+                    return False, f"original_order_unknown_status:status={status}"
+        except Exception as e:
+            # If we can't verify order status, be conservative
+            if "-2013" not in str(e) and "Unknown order" not in str(e):
+                return False, f"original_order_status_check_failed:error={str(e)[:50]}"
+            # -2013 means order truly doesn't exist on exchange, safe to proceed
+        
+        # Safety Check 2: Position Existence
+        try:
+            positions = await (
+                self.bot.order_manager.position_risk(pair)
+                if self.bot.order_manager
+                else self.bot.rest.position_risk(pair)
+            )
+            position_amt = 0.0
+            for p in positions or []:
+                if p.get("symbol") == pair:
+                    position_amt = float(p.get("positionAmt", 0) or 0)
+                    break
+            
+            if self.order_type == "entry":
+                # For entry orders, position should NOT exist
+                if abs(position_amt) > 0:
+                    return False, f"position_already_exists:amt={position_amt}"
+            else:
+                # For exit orders, position SHOULD exist
+                if abs(position_amt) == 0:
+                    return False, f"no_position_to_exit:amt=0"
+                # For exit orders, verify qty doesn't exceed position
+                if abs(qty) > abs(position_amt):
+                    qty = abs(position_amt)  # Clamp to position size
+        except Exception as e:
+            return False, f"position_check_failed:error={str(e)[:50]}"
+        
+        # Safety Check 3: Working Order Duplication
+        try:
+            open_orders = await (
+                self.bot.order_manager.get_open_orders(pair)
+                if self.bot.order_manager
+                else self.bot.rest.get_open_orders(pair)
+            )
+            for order in open_orders or []:
+                order_cid = order.get("clientOrderId", "")
+                if order_cid and order_cid != original_cid:
+                    # Check if it's same order type (entry vs exit)
+                    order_reduce_only = order.get("reduceOnly", False)
+                    if order_reduce_only == reduce_only:
+                        return False, f"duplicate_working_order:cid={order_cid}"
+        except Exception as e:
+            return False, f"open_orders_check_failed:error={str(e)[:50]}"
+        
+        # Safety Check 4: Internal State Consistency
+        if self.order_type == "entry":
+            # Entry order: Verify signal active and no position in bot state
+            if self.bot.signal_type == "NEUTRAL":
+                return False, "signal_no_longer_active"
+            if self.bot.state.get("entry_price", 0) > 0:
+                return False, f"bot_state_has_position:entry_price={self.bot.state.get('entry_price')}"
+        else:
+            # Exit order: Verify position exists in bot state
+            if self.bot.state.get("entry_price", 0) == 0:
+                return False, "bot_state_no_position"
+        
+        # Safety Check 5: Replacement Attempt Limit
+        # Track replacements per signal (reset counter on new signal)
+        current_signal_id = f"{self.bot.signal_type}_{self.bot.signal_time}"
+        if self._replacement_signal_id != current_signal_id:
+            self._replacement_attempts = 0
+            self._replacement_signal_id = current_signal_id
+        
+        if self._replacement_attempts >= 3:
+            return False, f"max_replacement_attempts:attempts={self._replacement_attempts}"
+        
+        # Safety Check 6: Cooldown Between Replacements
+        time_since_last = self._now() - self._last_replacement_time
+        if self._last_replacement_time > 0 and time_since_last < 1.0:
+            return False, f"cooldown_active:time_since_last={time_since_last:.2f}s"
+        
+        # All safety checks passed!
+        return True, "all_checks_passed"
+
+    async def _safe_replace_cancelled_order(
+        self,
+        *,
+        original_cid: str,
+        side: str,
+        qty: float,
+        new_price: float,
+        reduce_only: bool,
+        cancellation_reason: str
+    ) -> Tuple[Optional[str], float]:
+        """
+        Safely replace a cancelled order with comprehensive safety checks (v1.1.2 Ghost Order Fix).
+        Returns (new_cid, new_price) if successful, (None, old_price) if unsafe.
+        """
+        # Check config flag (emergency override)
+        if not self.bot.config.get("auto_replace_cancelled_orders", True):
+            self.bot._summary_log(
+                f"⏸️  AUTO_REPLACEMENT_DISABLED {{type={self.order_type}, "
+                f"cid={original_cid}, config_flag=false}}"
+            )
+            return None, self._last_price or new_price
+        
+        # For EXIT orders: Clear exit_id and let SL/TP logic handle (safer approach)
+        if self.order_type == "exit":
+            self.bot._summary_log(
+                f"🔄 EXIT_ORDER_CANCELLED_CLEARED {{cid={original_cid}, "
+                f"reason={cancellation_reason}, handling=sl_tp_logic}}"
+            )
+            return None, self._last_price or new_price
+        
+        # For ENTRY orders: Run all safety checks
+        is_safe, reason = await self._is_safe_to_replace_order(
+            original_cid=original_cid,
+            side=side,
+            qty=qty,
+            reduce_only=reduce_only
+        )
+        
+        if not is_safe:
+            self.bot._summary_log(
+                f"🚫 REPLACEMENT_BLOCKED {{type={self.order_type}, "
+                f"cid={original_cid}, reason={reason}}}"
+            )
+            return None, self._last_price or new_price
+        
+        # All checks passed, safe to place replacement
+        self.bot._summary_log(
+            f"🔄 GHOST_ORDER_RECOVERY_APPROVED {{type={self.order_type}, "
+            f"cid={original_cid}, cancellation_reason={cancellation_reason}, "
+            f"safety_checks=passed}}"
+        )
+        
+        # Update tracking
+        self._replacement_attempts += 1
+        self._last_replacement_time = self._now()
+        
+        # Place new order
+        try:
+            new_cid, new_price_actual = await self._place_new(
+                side=side,
+                qty=qty,
+                price=new_price,
+                reduce_only=reduce_only
+            )
+            self.bot._summary_log(
+                f"✅ GHOST_ORDER_REPLACED {{type={self.order_type}, "
+                f"old_cid={original_cid}, new_cid={new_cid}, "
+                f"attempt={self._replacement_attempts}/3}}"
+            )
+            return new_cid, new_price_actual
+        except Exception as e:
+            self.bot._summary_log(
+                f"❌ REPLACEMENT_FAILED {{type={self.order_type}, "
+                f"cid={original_cid}, error={str(e)[:100]}}}"
+            )
+            return None, new_price
 
     async def place_or_amend(self, *, side: str, qty: float, reduce_only: bool) -> Tuple[Optional[str], float]:
         book = self._get_book()
@@ -275,8 +478,34 @@ class MakerOrderController:
             cur_price = float(status.get("price", 0) or 0)
             if cur_price <= 0:
                 cur_price = None
-        except Exception:
+            # Ghost Order Fix v1.1.2: Reset circuit breaker on successful check
+            self._circuit_breaker_count = 0
+        except Exception as e:
             cur_price = None
+            error_str = str(e)
+            
+            # Ghost Order Fix v1.1.2: Circuit breaker for "Order does not exist" errors
+            if "-2013" in error_str or "Order does not exist" in error_str or "Unknown order" in error_str:
+                self._circuit_breaker_count += 1
+                
+                if self._circuit_breaker_count >= 3:
+                    self.bot._summary_log(
+                        f"⚡ CIRCUIT_BREAKER_TRIGGERED {{type={self.order_type}, "
+                        f"cid={cur_id}, failures={self._circuit_breaker_count}, "
+                        f"error=order_not_found}}"
+                    )
+                    self._set_current_order_id(None)
+                    self._circuit_breaker_count = 0
+                    
+                    # Use safe replacement with all safety checks
+                    return await self._safe_replace_cancelled_order(
+                        original_cid=cur_id,
+                        side=side,
+                        qty=qty,
+                        new_price=desired,
+                        reduce_only=reduce_only,
+                        cancellation_reason="circuit_breaker_3_failures"
+                    )
 
         # Fallback to last known price if status is unavailable
         if cur_price is None:
@@ -436,6 +665,24 @@ class MakerOrderController:
                 except Exception:
                     pass
                 self.bot._summary_log(f"ORDER_AMENDED {{type={self.order_type}, old={self._last_price}, new={new_price}, mode={mode}}}")
+                
+                # Ghost Order Fix v1.1.2: Check if order was cancelled during amendment
+                if "cancelled" in mode.lower() or "canceled" in mode.lower():
+                    self.bot._summary_log(
+                        f"🔍 GHOST_ORDER_DETECTED {{type={self.order_type}, "
+                        f"cid={orig}, mode={mode}, detection=ws_amend_response}}"
+                    )
+                    self._set_current_order_id(None)
+                    # Try safe replacement
+                    return await self._safe_replace_cancelled_order(
+                        original_cid=orig,
+                        side=side,
+                        qty=qty,
+                        new_price=new_price,
+                        reduce_only=reduce_only,
+                        cancellation_reason=f"ws_amend_mode_{mode}"
+                    )
+                
                 self._set_current_order_id(new_cid)
                 self._last_price = new_price
                 self._last_qty = float(qty)
@@ -495,6 +742,23 @@ class MakerOrderController:
                     if isinstance(snapshot, dict):
                         st = str(snapshot.get("status", "")).upper()
                         if st in ("FILLED", "CANCELED"):
+                            # Ghost Order Fix v1.1.2: Handle CANCELED orders specially
+                            if st == "CANCELED":
+                                self.bot._summary_log(
+                                    f"🔍 GHOST_ORDER_DETECTED {{type={self.order_type}, "
+                                    f"cid={orig}, status=CANCELED, detection=rest_snapshot}}"
+                                )
+                                self._set_current_order_id(None)
+                                # Try safe replacement
+                                return await self._safe_replace_cancelled_order(
+                                    original_cid=orig,
+                                    side=side,
+                                    qty=qty,
+                                    new_price=new_price,
+                                    reduce_only=reduce_only,
+                                    cancellation_reason="rest_snapshot_canceled"
+                                )
+                            # FILLED status - let normal flow handle
                             return orig, self._last_price or new_price
                         # ReduceOnly safety clamp: for exits, cap qty to current positionAmt
                         if reduce_only:
@@ -514,6 +778,24 @@ class MakerOrderController:
                 new_cid, mode = await self.bot.order_manager.update_limit_price(
                     self.bot.pair, orig, side, qty, new_price, reduce_only, self.bot.pc.precision, ws_only=False
                 )
+                
+                # Ghost Order Fix v1.1.2: Check if order was cancelled (REST fallback path)
+                if "cancelled" in mode.lower() or "canceled" in mode.lower():
+                    self.bot._summary_log(
+                        f"🔍 GHOST_ORDER_DETECTED {{type={self.order_type}, "
+                        f"cid={orig}, mode={mode}, detection=rest_fallback_response}}"
+                    )
+                    self._set_current_order_id(None)
+                    # Try safe replacement
+                    return await self._safe_replace_cancelled_order(
+                        original_cid=orig,
+                        side=side,
+                        qty=qty,
+                        new_price=new_price,
+                        reduce_only=reduce_only,
+                        cancellation_reason=f"rest_fallback_mode_{mode}"
+                    )
+                
                 self._set_current_order_id(new_cid)
                 self._last_price = new_price
                 self._last_qty = float(qty)

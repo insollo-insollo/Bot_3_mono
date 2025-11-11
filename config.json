@@ -133,10 +133,11 @@
       "api_key": "IFyaUd2G2HkaipMznlWHJiJ2ZSwNVJyKVydmdxOVy8Sw4qDqTatb8On5b1aJXCGI",
       "secret_key": "Z0tm2KI9TkVqJGZ2cKJI3wPP0NMRIKcoOXAIqxskuIBjhGaWp84TgPkSc2gYZMMn",
       "ip": "68.183.180.36",
-      "parts": 400
+      "parts": 100
     }
   ],
- "trading": {
+  "auto_replace_cancelled_orders": true,
+  "trading": {
   "cooldown_seconds": 0,
   "cooldown_minutes": 60,
   "ws_url": "wss://ws-fapi.binance.com/ws-fapi/v1"
