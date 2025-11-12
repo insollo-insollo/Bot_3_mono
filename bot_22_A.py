@@ -418,6 +418,9 @@ class SymbolBot:
         # FLAT SIGNAL DEDUPLICATION: Track if flat signal cleanup was already logged
         self.flat_signal_processed = saved_state.get("flat_signal_processed", False)
         
+        # FIX v1.2.1: Restore entry fill guard state
+        self.entry_filled_at = saved_state.get("entry_filled_at", 0)
+        
         # NEW: Logging mode (production/testing) loaded from config; default to testing
         try:
             cfg = load_json(CONFIG_PATH, {}) or {}
@@ -492,6 +495,11 @@ class SymbolBot:
         # Track when position closes via stream to avoid querying stale REST API data
         self.position_closed_at = 0  # Timestamp of last position closure notification
         self.position_closure_cooldown = 2.0  # Seconds to wait before trusting REST API after closure
+        
+        # FIX v1.2.1: Entry fill race condition prevention
+        # Track when entry fills via stream to prevent duplicate orders before position detection
+        # Note: entry_filled_at is restored from saved_state above, default cooldown set here
+        self.entry_fill_cooldown = 3.0  # Seconds to wait for position detection after entry fill
 
 
 
@@ -874,6 +882,9 @@ class SymbolBot:
         state_with_trades["last_ignored_signal_type"] = self.last_ignored_signal_type
         state_with_trades["flat_signal_processed"] = self.flat_signal_processed
         
+        # FIX v1.2.1: Save entry fill guard state
+        state_with_trades["entry_filled_at"] = self.entry_filled_at
+        
         data[self.pair] = state_with_trades
         save_json(self.state_file, data)
 
@@ -1130,6 +1141,13 @@ class SymbolBot:
                     # NEW: Enhanced position tracking
                     self.position_detection_count += 1
                     current_time = now()
+                    
+                    # FIX v1.2.1: Clear entry fill guard when position is detected
+                    # Position has been successfully detected, safe to allow new entries
+                    if self.entry_filled_at > 0:
+                        time_since_fill = current_time - self.entry_filled_at
+                        self._detailed_log(f"ENTRY_GUARD_CLEARED: Position detected {time_since_fill:.1f}s after fill")
+                        self.entry_filled_at = 0
                     
                     # NEW: Log position detection event
                     self._log_position_event("POSITION_DETECTED", {
@@ -3029,6 +3047,23 @@ class SymbolBot:
 
     async def _place_new_entry_order(self, price, st):
         """Place a new entry order for a fresh signal"""
+        
+        # FIX v1.2.1: Guard against duplicate entry orders during fill-to-position-detection window
+        # Similar to v1.1.1 position_closed_at cooldown, prevent entry placement immediately after fill
+        if self.entry_filled_at > 0:
+            time_since_fill = now() - self.entry_filled_at
+            if time_since_fill < self.entry_fill_cooldown:
+                # Block order placement within cooldown window
+                self._summary_log(
+                    f"🛡️ ENTRY_BLOCKED: Recent fill detected ({time_since_fill:.1f}s ago, "
+                    f"cooldown={self.entry_fill_cooldown}s) - waiting for position detection"
+                )
+                return  # CRITICAL: Exit without placing order
+            else:
+                # Cooldown expired - clear guard and proceed
+                self._detailed_log(f"ENTRY_GUARD_EXPIRED: Clearing after {time_since_fill:.1f}s")
+                self.entry_filled_at = 0
+        
         self.entry_order_time = now()
         self._reload_pair_params_if_changed()
         qty = await self._bet(price)
@@ -3425,7 +3460,9 @@ class SymbolBot:
                     # Update internal state immediately - minimal logging
                     if client_id == self.entry_id:
                         self.entry_id = None
-                        self._summary_log(f"ENTRY_FILLED_STREAM: cid={client_id}")
+                        # FIX v1.2.1: Mark entry fill time to prevent duplicate entry race condition
+                        self.entry_filled_at = now()
+                        self._summary_log(f"ENTRY_FILLED_STREAM: cid={client_id} [guard active for {self.entry_fill_cooldown}s]")
                     elif client_id == self.exit_id:
                         self.exit_id = None
                         # CRITICAL FIX: Clear controller tracking when exit order is filled
