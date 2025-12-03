@@ -1343,12 +1343,26 @@ class SymbolBot:
         """Return latest order book snapshot used by maker engine.
         Expects ws_prices to populate prices[f"{PAIR}_BOOK"] with best bid/ask and sizes.
         Fallback to last ask price with a synthetic bid one tick below if needed.
+        
+        v1.2.3 Fix: Added staleness check to prevent using stale WS data after disconnect.
+        If book data is older than 60 seconds, reject it and use fallback to prevent
+        -4024 price validation errors from stale cached prices.
         """
         try:
             key = f"{self.pair}_BOOK"
             ob = self.prices.get(key)
             if isinstance(ob, dict) and ob.get("best_bid") and ob.get("best_ask"):
-                return ob
+                # v1.2.3: Staleness check - reject book data older than 60 seconds
+                book_ts = ob.get("ts", 0)
+                if book_ts > 0:
+                    age = time.time() - book_ts
+                    if age > 60:  # 60 seconds staleness threshold
+                        self._detailed_log(f"⚠️ STALE_BOOK_REJECTED: {self.pair} book is {age:.0f}s old, using fallback")
+                        # Fall through to synthesize from last price
+                    else:
+                        return ob  # Book is fresh, use it
+                else:
+                    return ob  # No timestamp, assume fresh (backward compat)
             # Fallback: synthesize minimal book from last price
             last_ask = float(self.prices.get(self.pair, 0) or 0)
             if last_ask > 0:
