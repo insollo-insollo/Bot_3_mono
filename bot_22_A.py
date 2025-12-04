@@ -984,36 +984,44 @@ class SymbolBot:
         """
         Calculate position size (quantity) for entry orders.
         
-        v1.2.1 Fix: When dynamic leverage is enabled, calculate quantity to meet
-        minimum notional requirements ($100 on Binance Futures). This prevents
-        -4164 errors for high-price assets like BTC where the minimum quantity_step
-        results in notional < $100.
+        v1.2.4 Fix: Use equity-based calculation first, only enforce minimum notional
+        when the calculated quantity would result in notional < $100. This preserves
+        intended position sizing while still fixing high-price assets like BTC.
+        
+        Previous v1.2.2 bug: Always used minimum notional ($100) regardless of equity,
+        which reduced position sizes by ~90% for mid-price assets like BNB.
         """
         try:
             eq = await self.rest.account_equity()
             step = self.pc.quantity_step
+            min_notional = 100.0  # Binance Futures minimum notional requirement
             
             # Check if dynamic leverage mode is enabled
             cfg = load_json(CONFIG_PATH, {}) or {}
             lev_cfg = cfg.get("leverage", {})
             
             if lev_cfg.get("mode") == "dynamic":
-                # Dynamic leverage mode: ensure minimum notional is met
-                target_notional = float(lev_cfg.get("target_notional_usd", 100.0))
-                min_notional = 100.0  # Binance Futures minimum notional requirement
-                
-                # Use the larger of target_notional and min_notional
-                required_notional = max(target_notional, min_notional)
-                
-                # Calculate minimum quantity needed to meet notional requirement
-                # Round UP to ensure we meet the minimum (ceil behavior)
-                raw_qty = required_notional / price
-                qty_steps = math.ceil(raw_qty / step)
-                final_qty = qty_steps * step
-                
-                # Safety check: ensure we have sufficient margin
-                # With leverage, max position = equity * leverage
                 current_leverage = self.current_leverage or int(lev_cfg.get("base_leverage", 20))
+                
+                # STEP 1: Calculate using original equity-based formula first
+                raw = (eq / self.uc.parts * 100 / price) / step
+                equity_qty = int(raw) * step
+                equity_notional = equity_qty * price
+                
+                # STEP 2: Only enforce minimum notional if equity-based calculation is too small
+                if equity_notional >= min_notional:
+                    # Equity-based calculation is sufficient - use it
+                    final_qty = equity_qty
+                    self._detailed_log(f"BET_EQUITY: {self.pair} qty={final_qty} @ ${price:.2f} = ${equity_notional:.2f} notional (equity=${eq:.2f}, parts={self.uc.parts})")
+                else:
+                    # Need to scale up to meet minimum notional (for high-price assets like BTC)
+                    raw_qty = min_notional / price
+                    qty_steps = math.ceil(raw_qty / step)
+                    final_qty = qty_steps * step
+                    actual_notional = final_qty * price
+                    self._detailed_log(f"BET_MIN_NOTIONAL: {self.pair} equity calc too small (${equity_notional:.2f}), scaled to qty={final_qty} @ ${price:.2f} = ${actual_notional:.2f}")
+                
+                # STEP 3: Safety check - ensure we have sufficient margin
                 max_notional_with_margin = eq * current_leverage
                 max_qty_with_margin = max_notional_with_margin / price
                 
@@ -1022,12 +1030,10 @@ class SymbolBot:
                     final_qty = int(max_qty_with_margin / step) * step
                     self._detailed_log(f"⚠️ BET_MARGIN_LIMITED: Reduced qty to {final_qty} due to margin (equity=${eq:.2f}, leverage={current_leverage}x)")
                 
-                # Final validation: ensure notional meets minimum
+                # Final validation
                 actual_notional = final_qty * price
                 if actual_notional < min_notional:
                     self._summary_log(f"⚠️ BET_NOTIONAL_WARNING: {self.pair} qty={final_qty} @ ${price:.2f} = ${actual_notional:.2f} < ${min_notional} minimum")
-                
-                self._detailed_log(f"BET_DYNAMIC: {self.pair} qty={final_qty} @ ${price:.2f} = ${actual_notional:.2f} notional (target=${required_notional}, leverage={current_leverage}x)")
                 
                 return final_qty
             else:

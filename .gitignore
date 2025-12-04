@@ -1,0 +1,20 @@
+# Server-specific config (contains API keys)
+config.json
+
+# Logs
+logs/
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# State files
+user_state/
+
+# Analysis files (server-specific)
+*.md
+!README.md
+
+
