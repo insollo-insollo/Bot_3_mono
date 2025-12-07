@@ -1201,6 +1201,13 @@ class SymbolBot:
                     self.exit_id = None
                     # CRITICAL FIX: Clear controller tracking when exit_id is cleared
                     self.exit_controller_type = None
+                    # FIX v1.1.3: Clear ESL state to prevent stale values affecting future positions
+                    # Without this, emergency_sl_price and emergency_sl_initialized persist,
+                    # causing new positions to inherit wrong ESL levels via lock-in logic
+                    self.emergency_sl_price = 0.0
+                    self.emergency_sl_activated = False
+                    self.emergency_sl_tp_reference = 0.0
+                    self.emergency_sl_initialized = False
                     self._detailed_log("State cleared after confirmed no-position")
                 return True
         else:
@@ -1650,6 +1657,11 @@ class SymbolBot:
                         if self._no_position_count >= 3:
                             self._summary_log("🔄 PROACTIVE_SYNC: Clearing stale position state after multiple confirmations")
                             self.state.update({"tp": 0, "sl": 0, "last": now()})
+                            # FIX v1.1.3: Clear ESL state to prevent stale values affecting future positions
+                            self.emergency_sl_price = 0.0
+                            self.emergency_sl_activated = False
+                            self.emergency_sl_tp_reference = 0.0
+                            self.emergency_sl_initialized = False
                             self._no_position_count = 0
                         else:
                             self._detailed_log(f"PROACTIVE_SYNC: No position detected ({self._no_position_count}/3 checks) - waiting for confirmation")
@@ -2888,6 +2900,11 @@ class SymbolBot:
             self.entry_id = None
             self.exit_id = None
             self.state.update({"tp": 0, "sl": 0})
+            # FIX v1.1.3: Clear ESL state to prevent stale values affecting future positions
+            self.emergency_sl_price = 0.0
+            self.emergency_sl_activated = False
+            self.emergency_sl_tp_reference = 0.0
+            self.emergency_sl_initialized = False
             self._detailed_log("All orders cleaned up, state reset")
             
         except Exception as e:
@@ -2895,6 +2912,11 @@ class SymbolBot:
             # Still reset tracking to prevent stuck state
             self.entry_id = None
             self.exit_id = None
+            # FIX v1.1.3: Also clear ESL state in error path
+            self.emergency_sl_price = 0.0
+            self.emergency_sl_activated = False
+            self.emergency_sl_tp_reference = 0.0
+            self.emergency_sl_initialized = False
 
     async def _adapt_entry(self, price, st):
         if not self.entry_id:
