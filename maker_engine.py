@@ -264,6 +264,35 @@ class MakerOrderController:
     async def _place_new(self, *, side: str, qty: float, price: float, reduce_only: bool) -> Tuple[Optional[str], float]:
         pair = self.bot.pair
         tick = self._get_tick()
+        
+        # Check if notional is below minimum for reduce-only orders (closing dust positions)
+        # GTX limit orders require minimum notional, but market orders can close any size
+        if reduce_only:
+            min_notional = 100.0  # Default Binance futures minimum
+            try:
+                if getattr(self.bot, "_symbol_filters", None):
+                    min_notional = float(self.bot._symbol_filters.get("minNotional", 100.0) or 100.0)
+            except Exception:
+                pass
+            notional = qty * price
+            if notional < min_notional:
+                # Use market order to close dust position
+                self.bot._summary_log(f"🔄 DUST_EXIT_MARKET: Notional ${notional:.2f} < min ${min_notional:.2f}")
+                self.bot._summary_log(f"   Using MARKET order: {side} {qty}")
+                try:
+                    if self.bot.order_manager:
+                        await self.bot.order_manager.place_market(pair, side, qty, True)
+                    else:
+                        await self.bot.rest.place_market(pair, side, qty, True)
+                    self.bot._summary_log(f"✅ DUST POSITION CLOSED: {side} {qty} @ MARKET")
+                except Exception as e:
+                    self.bot._summary_log(f"⚠️ DUST MARKET ORDER FAILED: {e}")
+                # Clear exit tracking since we used market order
+                self._set_current_order_id(None)
+                self._last_price = None
+                self._last_qty = None
+                return None, price
+        
         ladder = list(self.tuning.ladder_ticks)
         cid_prefix = f"{pair}_open" if self.order_type == "entry" else f"{pair}_close"
         # Try ladder with rebase per step
@@ -333,6 +362,41 @@ class MakerOrderController:
         if self._amend_inflight and (self._now() - self._amend_started_at) * 1000 < self.tuning.amend_time_budget_ms:
             self.bot._summary_log("AMEND_SKIPPED {reason=inflight|budget}")
             return self._current_order_id(), self._last_price or new_price
+        
+        # Check if notional is below minimum for reduce-only orders (closing dust positions)
+        # GTX limit orders require minimum notional, but market orders can close any size
+        if reduce_only:
+            min_notional = 100.0  # Default Binance futures minimum
+            try:
+                if getattr(self.bot, "_symbol_filters", None):
+                    min_notional = float(self.bot._symbol_filters.get("minNotional", 100.0) or 100.0)
+            except Exception:
+                pass
+            notional = qty * new_price
+            if notional < min_notional:
+                # Cancel existing order (if any) and use market order instead
+                self.bot._summary_log(f"🔄 DUST_EXIT_MARKET: Notional ${notional:.2f} < min ${min_notional:.2f}")
+                self.bot._summary_log(f"   Using MARKET order: {side} {qty}")
+                orig = self._current_order_id()
+                if orig:
+                    try:
+                        await self.bot.order_manager.cancel(self.bot.pair, orig) if self.bot.order_manager else await self.bot.rest.cancel(self.bot.pair, orig)
+                    except Exception:
+                        pass  # Order may not exist
+                try:
+                    if self.bot.order_manager:
+                        await self.bot.order_manager.place_market(self.bot.pair, side, qty, True)
+                    else:
+                        await self.bot.rest.place_market(self.bot.pair, side, qty, True)
+                    self.bot._summary_log(f"✅ DUST POSITION CLOSED: {side} {qty} @ MARKET")
+                except Exception as e:
+                    self.bot._summary_log(f"⚠️ DUST MARKET ORDER FAILED: {e}")
+                # Clear exit tracking since we used market order
+                self._set_current_order_id(None)
+                self._last_price = None
+                self._last_qty = None
+                return None, new_price
+        
         self._amend_inflight = True
         self._amend_started_at = self._now()
         try:

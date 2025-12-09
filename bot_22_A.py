@@ -2598,6 +2598,40 @@ class SymbolBot:
                 })
                 
                 self._detailed_log(f"Partial fill detected: filled={filled_qty}, remaining_position={remaining}")
+                
+                # Check if remaining position is below minimum notional for GTX limit orders
+                min_notional = 100.0  # Default Binance futures minimum
+                try:
+                    if getattr(self, "_symbol_filters", None):
+                        min_notional = float(self._symbol_filters.get("minNotional", 100.0) or 100.0)
+                except Exception:
+                    pass
+                remaining_notional = remaining * price
+                
+                if remaining_notional < min_notional:
+                    # Remaining position is dust - use market order to close immediately
+                    order_side = "SELL" if side == "LONG" else "BUY"
+                    self._summary_log(f"🔄 PARTIAL_FILL_DUST: Remaining notional ${remaining_notional:.2f} < min ${min_notional:.2f}")
+                    self._summary_log(f"   Using MARKET order to close dust position: {order_side} {remaining}")
+                    
+                    try:
+                        await self._cancel(self.exit_id)
+                    except Exception:
+                        pass  # Order may already be filled/canceled
+                    
+                    try:
+                        if self.order_manager:
+                            await self.order_manager.place_market(self.pair, order_side, remaining, True)
+                        else:
+                            await self.rest.place_market(self.pair, order_side, remaining, True)
+                        self._summary_log(f"✅ DUST POSITION CLOSED: {order_side} {remaining} @ MARKET")
+                    except Exception as e:
+                        self._summary_log(f"⚠️ DUST MARKET ORDER FAILED: {e}")
+                    
+                    self.exit_id = None
+                    return
+                
+                # Normal case: remaining position is above minimum notional
                 self._summary_log(f"🔄 PARTIAL_FILL_RECOVERY: Canceling and re-placing exit order for remaining {remaining}")
                 await self._cancel(self.exit_id)
                 await self._place_exit(side, remaining, price, "Partial")
