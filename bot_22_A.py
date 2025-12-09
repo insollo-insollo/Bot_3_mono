@@ -1393,7 +1393,10 @@ class SymbolBot:
                     if self.emergency_cid and self.emergency_sl_price > 0 and self.order_manager:
                         side = "SELL" if (self.state.get("side") or "LONG") == "LONG" else "BUY"
                         try:
-                            await self.order_manager.modify_emergency_stop(self.pair, self.emergency_cid, side, float(self.emergency_sl_price))
+                            # NEW: modify_emergency_stop now returns (new_cid, mode) due to cancel+replace
+                            new_cid, mode = await self.order_manager.modify_emergency_stop(self.pair, self.emergency_cid, side, float(self.emergency_sl_price))
+                            if new_cid and new_cid != self.emergency_cid:
+                                self.emergency_cid = new_cid  # Update tracked cid
                             self._summary_log(f"🛡️ EMERGENCY STOP ORDER ADOPTED & AMENDED: cid={self.emergency_cid} stopPrice={self.emergency_sl_price:.5f}")
                         except Exception:
                             self._summary_log(f"🛡️ EMERGENCY STOP ORDER ADOPTED: cid={self.emergency_cid} (amendment failed)")
@@ -1898,7 +1901,10 @@ class SymbolBot:
                         if self.emergency_cid and self.order_manager:
                             try:
                                 eside = "SELL" if side == "LONG" else "BUY"
-                                await self.order_manager.modify_emergency_stop(self.pair, self.emergency_cid, eside, float(self.emergency_sl_price))
+                                # NEW: modify_emergency_stop now returns (new_cid, mode) due to cancel+replace
+                                new_cid, mode = await self.order_manager.modify_emergency_stop(self.pair, self.emergency_cid, eside, float(self.emergency_sl_price))
+                                if new_cid and new_cid != self.emergency_cid:
+                                    self.emergency_cid = new_cid  # Update tracked cid
                                 self._summary_log(f"🛡️ ESL_UPDATED: {old_emergency_sl:.5f}→{self.emergency_sl_price:.5f} | Reason=trailing_tp | New_Reference=TP@{self.state['tp']:.5f}")
                             except Exception as e:
                                 self._summary_log(f"❌ EMERGENCY STOP AMEND FAILED: {e}")
@@ -3257,7 +3263,11 @@ class SymbolBot:
                     self.emergency_cid = kept_cid
                     if desired_stop > 0:
                         try:
-                            await self.order_manager.modify_emergency_stop(self.pair, kept_cid, "SELL" if side == "LONG" else "BUY", float(desired_stop))
+                            # NEW: modify_emergency_stop now returns (new_cid, mode) due to cancel+replace
+                            new_cid, mode = await self.order_manager.modify_emergency_stop(self.pair, kept_cid, "SELL" if side == "LONG" else "BUY", float(desired_stop))
+                            if new_cid and new_cid != kept_cid:
+                                self.emergency_cid = new_cid  # Update tracked cid
+                                kept_cid = new_cid
                         except Exception:
                             pass
                     try:

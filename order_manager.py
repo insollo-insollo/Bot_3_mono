@@ -764,24 +764,39 @@ class OrderManager:
 				pass
 
 	async def place_emergency_stop(self, symbol: str, side: str, stop_price: float, cid: str) -> Tuple[Any, str]:
-		"""Place emergency STOP_MARKET order with closePosition=True via WebSocket-first policy."""
+		"""Place emergency STOP_MARKET order with closePosition=True via WebSocket-first policy.
+		
+		UPDATED 2025-12-09: Migrated to Algo Service per Binance changelog (effective 2025-12-09).
+		Now uses algoOrder.place (WS) and POST /fapi/v1/algoOrder (REST) endpoints.
+		See: https://developers.binance.com/docs/derivatives/change-log
+		"""
 		if self._ws_allowed():
 			try:
 				await self.ws.connect()
+				# NEW: Use algoOrder.place for conditional orders (Algo Service migration)
 				params = {
 					"symbol": symbol,
 					"side": side,
+					"algoType": "CONDITIONAL",
 					"type": "STOP_MARKET",
-					"stopPrice": str(stop_price),
+					"triggerPrice": str(stop_price),
 					"closePosition": "true",
 					"workingType": "CONTRACT_PRICE",
 					"newClientOrderId": cid
 				}
-				resp = await self.ws.send_request("order.place", params)
+				resp = await self.ws.send_request("algoOrder.place", params)
+				# Check for error response
+				if isinstance(resp, dict):
+					status = resp.get("status")
+					err = resp.get("error") or {}
+					code = err.get("code")
+					msg = err.get("msg")
+					if code is not None or (isinstance(status, int) and status >= 400):
+						raise Exception(f"ALGO_ORDER_PLACE_ERROR status={status} code={code} msg={msg}")
 				self._record_ws_success()
 				if self.symbol_bot and hasattr(self.symbol_bot, "_summary_log"):
 					try:
-						self.symbol_bot._summary_log("EMERGENCY_STOP_PLACE_RESPONSE {mode=ws}")
+						self.symbol_bot._summary_log("EMERGENCY_STOP_PLACE_RESPONSE {mode=ws.algo}")
 					except Exception:
 						pass
 				return resp, "WS"
@@ -793,20 +808,21 @@ class OrderManager:
 					except Exception:
 						pass
 		
-		# REST fallback - use direct API call since BinanceREST doesn't have place_order method
+		# REST fallback - use new algoOrder endpoint (Algo Service migration)
 		try:
-			resp = await self.rest._call("POST", "/fapi/v1/order", {
+			resp = await self.rest._call("POST", "/fapi/v1/algoOrder", {
 				"symbol": symbol,
 				"side": side,
+				"algoType": "CONDITIONAL",
 				"type": "STOP_MARKET",
-				"stopPrice": str(stop_price),
+				"triggerPrice": str(stop_price),
 				"closePosition": "true",
 				"workingType": "CONTRACT_PRICE",
 				"newClientOrderId": cid
 			}, True)
 			if self.symbol_bot and hasattr(self.symbol_bot, "_summary_log"):
 				try:
-					self.symbol_bot._summary_log("EMERGENCY_STOP_PLACE_RESPONSE {mode=rest}")
+					self.symbol_bot._summary_log("EMERGENCY_STOP_PLACE_RESPONSE {mode=rest.algo}")
 				except Exception:
 					pass
 			return resp, "REST"
@@ -825,8 +841,16 @@ class OrderManager:
 			raise
 
 	async def modify_emergency_stop(self, symbol: str, cid: str, side: str, new_stop_price: float) -> Tuple[str, str]:
-		"""Modify emergency STOP_MARKET order stop price via WebSocket-first policy."""
-		# NEW: Debounce per-cid to avoid concurrent modify on the same emergency order
+		"""Modify emergency STOP_MARKET order stop price via cancel-and-replace.
+		
+		UPDATED 2025-12-09: Migrated to Algo Service per Binance changelog (effective 2025-12-09).
+		Modification of untriggered conditional orders is NO LONGER SUPPORTED.
+		Must use cancel-and-replace: algoOrder.cancel then algoOrder.place.
+		See: https://developers.binance.com/docs/derivatives/change-log
+		
+		Returns: (new_cid, mode) - new_cid may differ from input cid after replacement
+		"""
+		# Debounce per-cid to avoid concurrent modify on the same emergency order
 		if cid in self._amend_inflight:
 			try:
 				if self.symbol_bot and hasattr(self.symbol_bot, "_summary_log"):
@@ -835,41 +859,143 @@ class OrderManager:
 				pass
 			return cid, "ws.debounce"
 		self._amend_inflight[cid] = time.time()
+		
+		# Generate new client order ID for replacement order
+		import random
+		new_cid = f"esl-{symbol}-{int(time.time() * 1000)}"
+		
 		try:
+			# STEP 1: Cancel existing algo order
+			cancel_success = False
 			if self._ws_allowed():
 				try:
 					await self.ws.connect()
-					params = {
+					cancel_params = {
 						"symbol": symbol,
-						"origClientOrderId": cid,
-						"side": side,
-						"stopPrice": str(new_stop_price)
+						"origClientOrderId": cid
 					}
-					resp = await self.ws.send_request("order.modify", params)
-					self._record_ws_success()
-					if self.symbol_bot and hasattr(self.symbol_bot, "_summary_log"):
-						try:
-							self.symbol_bot._summary_log("EMERGENCY_STOP_MODIFY_RESPONSE {mode=ws}")
-						except Exception:
-							pass
-					return resp, "WS"
+					cancel_resp = await self.ws.send_request("algoOrder.cancel", cancel_params)
+					# Check for error response
+					if isinstance(cancel_resp, dict):
+						status = cancel_resp.get("status")
+						err = cancel_resp.get("error") or {}
+						code = err.get("code")
+						if code is None and (status is None or status == 200):
+							cancel_success = True
+							self._record_ws_success()
+						else:
+							# Log but continue - order might already be triggered/cancelled
+							if self.symbol_bot and hasattr(self.symbol_bot, "_summary_log"):
+								try:
+									self.symbol_bot._summary_log(f"EMERGENCY_STOP_CANCEL_WS_WARN: code={code} msg={err.get('msg')}")
+								except Exception:
+									pass
+					else:
+						cancel_success = True
+						self._record_ws_success()
 				except Exception as e:
 					self._record_ws_failure()
 					if self.symbol_bot and hasattr(self.symbol_bot, "_summary_log"):
 						try:
-							self.symbol_bot._summary_log(f"EMERGENCY_STOP_MODIFY_WS_FAILED: {e}")
+							self.symbol_bot._summary_log(f"EMERGENCY_STOP_CANCEL_WS_FAILED: {e}")
 						except Exception:
 							pass
 			
-			# REST fallback suppressed for STOP_MARKET closePosition to avoid -1102 quantity errors
+			# REST fallback for cancel if WS failed
+			if not cancel_success:
+				try:
+					await self.rest._call("DELETE", "/fapi/v1/algoOrder", {
+						"symbol": symbol,
+						"origClientOrderId": cid
+					}, True)
+					cancel_success = True
+				except Exception as e:
+					# Log but continue - order might already be triggered/cancelled
+					if self.symbol_bot and hasattr(self.symbol_bot, "_summary_log"):
+						try:
+							self.symbol_bot._summary_log(f"EMERGENCY_STOP_CANCEL_REST_WARN: {e}")
+						except Exception:
+							pass
+					# Continue anyway - we'll try to place the new order
+					cancel_success = True  # Assume old order is gone
+			
+			# STEP 2: Place new algo order with updated stop price
+			if cancel_success:
+				place_success = False
+				if self._ws_allowed():
+					try:
+						await self.ws.connect()
+						place_params = {
+							"symbol": symbol,
+							"side": side,
+							"algoType": "CONDITIONAL",
+							"type": "STOP_MARKET",
+							"triggerPrice": str(new_stop_price),
+							"closePosition": "true",
+							"workingType": "CONTRACT_PRICE",
+							"newClientOrderId": new_cid
+						}
+						place_resp = await self.ws.send_request("algoOrder.place", place_params)
+						# Check for error response
+						if isinstance(place_resp, dict):
+							status = place_resp.get("status")
+							err = place_resp.get("error") or {}
+							code = err.get("code")
+							if code is None and (status is None or status == 200):
+								place_success = True
+								self._record_ws_success()
+							else:
+								raise Exception(f"ALGO_ORDER_PLACE_ERROR status={status} code={code} msg={err.get('msg')}")
+						else:
+							place_success = True
+							self._record_ws_success()
+					except Exception as e:
+						self._record_ws_failure()
+						if self.symbol_bot and hasattr(self.symbol_bot, "_summary_log"):
+							try:
+								self.symbol_bot._summary_log(f"EMERGENCY_STOP_REPLACE_WS_FAILED: {e}")
+							except Exception:
+								pass
+				
+				# REST fallback for place if WS failed
+				if not place_success:
+					try:
+						await self.rest._call("POST", "/fapi/v1/algoOrder", {
+							"symbol": symbol,
+							"side": side,
+							"algoType": "CONDITIONAL",
+							"type": "STOP_MARKET",
+							"triggerPrice": str(new_stop_price),
+							"closePosition": "true",
+							"workingType": "CONTRACT_PRICE",
+							"newClientOrderId": new_cid
+						}, True)
+						place_success = True
+					except Exception as e:
+						if self.symbol_bot and hasattr(self.symbol_bot, "_summary_log"):
+							try:
+								self.symbol_bot._summary_log(f"EMERGENCY_STOP_REPLACE_REST_FAILED: {e}")
+							except Exception:
+								pass
+						raise
+				
+				if place_success:
+					if self.symbol_bot and hasattr(self.symbol_bot, "_summary_log"):
+						try:
+							self.symbol_bot._summary_log(f"EMERGENCY_STOP_MODIFY_RESPONSE {{mode=cancel+replace, old_cid={cid}, new_cid={new_cid}}}")
+						except Exception:
+							pass
+					return new_cid, "cancel+replace"
+			
+			# If we get here, something failed
 			if self.symbol_bot and hasattr(self.symbol_bot, "_summary_log"):
 				try:
-					self.symbol_bot._summary_log("EMERGENCY_STOP_MODIFY_REST_SKIPPED")
+					self.symbol_bot._summary_log("EMERGENCY_STOP_MODIFY_FAILED: cancel+replace unsuccessful")
 				except Exception:
 					pass
-			return cid, "ws.failed"
+			return cid, "failed"
 		finally:
 			try:
 				self._amend_inflight.pop(cid, None)
 			except Exception:
-				pass 
+				pass
