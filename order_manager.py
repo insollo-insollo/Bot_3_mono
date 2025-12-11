@@ -782,6 +782,7 @@ class OrderManager:
 					"triggerPrice": str(stop_price),
 					"closePosition": "true",
 					"workingType": "CONTRACT_PRICE",
+					"timeInForce": "GTC",  # FIX: Use GTC to avoid -4509 GTE position requirement
 					"newClientOrderId": cid
 				}
 				resp = await self.ws.send_request("algoOrder.place", params)
@@ -792,6 +793,14 @@ class OrderManager:
 					code = err.get("code")
 					msg = err.get("msg")
 					if code is not None or (isinstance(status, int) and status >= 400):
+						# FIX: Handle -4130 gracefully - ESL already exists, treat as success
+						if code == -4130:
+							if self.symbol_bot and hasattr(self.symbol_bot, "_summary_log"):
+								try:
+									self.symbol_bot._summary_log(f"EMERGENCY_STOP_ALREADY_EXISTS: ESL already on exchange (code=-4130)")
+								except Exception:
+									pass
+							return resp, "WS_EXISTING"
 						raise Exception(f"ALGO_ORDER_PLACE_ERROR status={status} code={code} msg={msg}")
 				self._record_ws_success()
 				if self.symbol_bot and hasattr(self.symbol_bot, "_summary_log"):
@@ -818,6 +827,7 @@ class OrderManager:
 				"triggerPrice": str(stop_price),
 				"closePosition": "true",
 				"workingType": "CONTRACT_PRICE",
+				"timeInForce": "GTC",  # FIX: Use GTC to avoid -4509 GTE position requirement
 				"newClientOrderId": cid
 			}, True)
 			if self.symbol_bot and hasattr(self.symbol_bot, "_summary_log"):
@@ -827,6 +837,14 @@ class OrderManager:
 					pass
 			return resp, "REST"
 		except Exception as e:
+			# FIX: Handle -4130 gracefully - ESL already exists, treat as success
+			if "-4130" in str(e):
+				if self.symbol_bot and hasattr(self.symbol_bot, "_summary_log"):
+					try:
+						self.symbol_bot._summary_log(f"EMERGENCY_STOP_ALREADY_EXISTS: ESL already on exchange (code=-4130)")
+					except Exception:
+						pass
+				return None, "REST_EXISTING"
 			if self.symbol_bot and hasattr(self.symbol_bot, "_summary_log"):
 				try:
 					self.symbol_bot._summary_log(f"EMERGENCY_STOP_PLACE_REST_FAILED: {e}")
@@ -933,6 +951,7 @@ class OrderManager:
 							"triggerPrice": str(new_stop_price),
 							"closePosition": "true",
 							"workingType": "CONTRACT_PRICE",
+							"timeInForce": "GTC",  # FIX: Use GTC to avoid -4509 GTE position requirement
 							"newClientOrderId": new_cid
 						}
 						place_resp = await self.ws.send_request("algoOrder.place", place_params)
@@ -945,11 +964,44 @@ class OrderManager:
 								place_success = True
 								self._record_ws_success()
 							else:
+								# FIX: Handle -4509 gracefully - position closed means ESL not needed
+								if code == -4509:
+									if self.symbol_bot and hasattr(self.symbol_bot, "_summary_log"):
+										try:
+											self.symbol_bot._summary_log(f"EMERGENCY_STOP_MODIFY_SKIPPED: Position closed, ESL not needed (code=-4509)")
+										except Exception:
+											pass
+									return new_cid, "position_closed"
+								# FIX: Handle -4130 gracefully - ESL already exists
+								if code == -4130:
+									if self.symbol_bot and hasattr(self.symbol_bot, "_summary_log"):
+										try:
+											self.symbol_bot._summary_log(f"EMERGENCY_STOP_ALREADY_EXISTS: ESL already on exchange (code=-4130)")
+										except Exception:
+											pass
+									return new_cid, "existing"
 								raise Exception(f"ALGO_ORDER_PLACE_ERROR status={status} code={code} msg={err.get('msg')}")
 						else:
 							place_success = True
 							self._record_ws_success()
 					except Exception as e:
+						err_str = str(e)
+						# FIX: Handle -4509 gracefully - position closed means ESL not needed
+						if "-4509" in err_str:
+							if self.symbol_bot and hasattr(self.symbol_bot, "_summary_log"):
+								try:
+									self.symbol_bot._summary_log(f"EMERGENCY_STOP_MODIFY_SKIPPED: Position closed, ESL not needed (code=-4509)")
+								except Exception:
+									pass
+							return new_cid, "position_closed"
+						# FIX: Handle -4130 gracefully - ESL already exists
+						if "-4130" in err_str:
+							if self.symbol_bot and hasattr(self.symbol_bot, "_summary_log"):
+								try:
+									self.symbol_bot._summary_log(f"EMERGENCY_STOP_ALREADY_EXISTS: ESL already on exchange (code=-4130)")
+								except Exception:
+									pass
+							return new_cid, "existing"
 						self._record_ws_failure()
 						if self.symbol_bot and hasattr(self.symbol_bot, "_summary_log"):
 							try:
@@ -968,10 +1020,28 @@ class OrderManager:
 							"triggerPrice": str(new_stop_price),
 							"closePosition": "true",
 							"workingType": "CONTRACT_PRICE",
+							"timeInForce": "GTC",  # FIX: Use GTC to avoid -4509 GTE position requirement
 							"newClientOrderId": new_cid
 						}, True)
 						place_success = True
 					except Exception as e:
+						err_str = str(e)
+						# FIX: Handle -4509 gracefully - position closed means ESL not needed
+						if "-4509" in err_str:
+							if self.symbol_bot and hasattr(self.symbol_bot, "_summary_log"):
+								try:
+									self.symbol_bot._summary_log(f"EMERGENCY_STOP_MODIFY_SKIPPED: Position closed, ESL not needed (code=-4509)")
+								except Exception:
+									pass
+							return new_cid, "position_closed"
+						# FIX: Handle -4130 gracefully - ESL already exists
+						if "-4130" in err_str:
+							if self.symbol_bot and hasattr(self.symbol_bot, "_summary_log"):
+								try:
+									self.symbol_bot._summary_log(f"EMERGENCY_STOP_ALREADY_EXISTS: ESL already on exchange (code=-4130)")
+								except Exception:
+									pass
+							return new_cid, "existing"
 						if self.symbol_bot and hasattr(self.symbol_bot, "_summary_log"):
 							try:
 								self.symbol_bot._summary_log(f"EMERGENCY_STOP_REPLACE_REST_FAILED: {e}")
